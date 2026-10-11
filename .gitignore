@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.venv/
+cache/
+profile/
+settings.json
+telegram-secret.json
+alerts.json
+*.log
