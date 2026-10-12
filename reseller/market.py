@@ -3,6 +3,8 @@ from dataclasses import dataclass, field
 import math
 import time
 from urllib.parse import quote
+import hashlib
+import json
 from .net import ApiError, Cancelled, check
 
 BASE = 'https://universalis.app/api/v2/'
@@ -19,6 +21,21 @@ class Listing:
     hq: bool
     reviewed: int
     identity: str = ''
+    offer_key: str = ''
+    base_key: str = ''
+
+
+def offer_keys(item, world, raw):
+    identity = str(raw.get('listingID') or '')
+    if identity and not identity.startswith('dirty:'):
+        base = [item, world, identity]
+    else:
+        # Synthetic IDs can change solely when review time changes. Ignore their ID/time.
+        retainer = str(raw.get('retainerID') or raw.get('retainerName') or raw.get('sellerID') or '')
+        base = [item, world, retainer, raw.get('hq'), raw.get('materia') or [], raw.get('stainID', 0)]
+    base_key = hashlib.sha256(json.dumps(base, sort_keys=True).encode()).hexdigest()
+    revision = [base_key, raw.get('hq'), raw.get('pricePerUnit'), raw.get('quantity')]
+    return hashlib.sha256(json.dumps(revision).encode()).hexdigest(), base_key
 
 
 @dataclass(frozen=True)
@@ -80,6 +97,7 @@ class Market:
     def __init__(self, cache, now=time.time):
         self.cache, self.now = cache, now
         self.warnings = []
+        self.history = {}
 
     def overview(self, world, ids, settings, force=False, progress=lambda x: None, cancel=None):
         scores = {}
@@ -109,7 +127,8 @@ class Market:
                 self.warnings.append(f'Отбор пакета {offset + 1}: {exc}')
         return scores
 
-    def detailed(self, dc, world, ids, force=False, progress=lambda x: None, cancel=None):
+    def detailed(self, dc, world, ids, force=False, progress=lambda x: None, cancel=None, reuse_history=False):
+        self.history = {k: v for k, v in self.history.items() if 0 <= self.now() - v[0] <= 120}
         output = {item: Snapshot() for item in ids}
         for offset in range(0, len(ids), 10):
             batch = ids[offset:offset + 10]
@@ -120,9 +139,21 @@ class Market:
                     (True, BASE + f'history/{world}/' + path + f'?entriesToReturn={HISTORY_LIMIT}&entriesWithin={WEEK}&statsWithin={WEEK * 1000}')]
             for history, url in urls:
                 try:
+                    wanted = batch
+                    if history and reuse_history:
+                        wanted = []
+                        for item in batch:
+                            cached = self.history.get((world, item))
+                            if cached and 0 <= self.now() - cached[0] <= 120:
+                                output[item].history_fetched, output[item].sales, output[item].truncated = cached
+                            else:
+                                wanted.append(item)
+                        if not wanted:
+                            continue
+                        url = BASE + f'history/{world}/' + ','.join(map(str, wanted)) + f'?entriesToReturn={HISTORY_LIMIT}&entriesWithin={WEEK}&statsWithin={WEEK * 1000}'
                     value, fetched = self.cache.get(url, 120, force, cancel)
                     payload = entries(value)
-                    for item in batch:
+                    for item in wanted:
                         snap = output[item]
                         try:
                             row = payload[str(item)]
@@ -138,6 +169,9 @@ class Market:
                                     stamp = timestamp(sale['timestamp'])
                                     if not sale.get('onMannequin', False) and self.now() - WEEK <= stamp <= self.now():
                                         snap.sales.append(Sale(sale['pricePerUnit'], sale['quantity'], sale['hq'], int(stamp)))
+                                self.history[world, item] = (snap.history_fetched, snap.sales, snap.truncated)
+                                if len(self.history) > 256:
+                                    self.history.pop(next(iter(self.history)))
                             else:
                                 raw = row['listings']
                                 if not isinstance(raw, list):
@@ -152,7 +186,8 @@ class Market:
                                         raise ValueError('Некорректное объявление')
                                     if not listing.get('onMannequin', False):
                                         identity = str(listing.get('listingID') or listing.get('retainerID') or listing.get('retainerName') or '')
-                                        snap.listings.append(Listing(item, listing['worldID'], listing['pricePerUnit'], listing['quantity'], listing['hq'], int(timestamp(listing.get('lastReviewTime', 0))), identity))
+                                        key, base_key = offer_keys(item, listing['worldID'], listing)
+                                        snap.listings.append(Listing(item, listing['worldID'], listing['pricePerUnit'], listing['quantity'], listing['hq'], int(timestamp(listing.get('lastReviewTime', 0))), identity, key, base_key))
                         except (ValueError, KeyError, TypeError) as exc:
                             snap.errors.append(f'{"История" if history else "Предложения"}: {exc}')
                 except Cancelled:

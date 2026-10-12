@@ -29,7 +29,7 @@ def defaults():
                 interval_minutes=5, overview_limit=3000, detail_limit=100,
                 notify=False, chat_id='', alert_limit=10, cooldown_minutes=120,
                 stress_drop=10, reserve_percent=20, min_active_days=3,
-                nearby_percent=5, max_supply_days=7, priority='Оборот прибыли')
+                nearby_percent=5, max_supply_days=7, priority='Оборот прибыли', hot_improvement=25)
 
 
 def normalize(raw):
@@ -53,7 +53,7 @@ def normalize(raw):
                   undercut=(0, 1000000), interval_minutes=(1, 1440), overview_limit=(100, 50000),
                   detail_limit=(1, 1000), alert_limit=(1, 30), cooldown_minutes=(1, 10080),
                   stress_drop=(0, 50), reserve_percent=(0, 90), min_active_days=(1, 7),
-                  nearby_percent=(0, 50), max_supply_days=(.1, 100))
+                  nearby_percent=(0, 50), max_supply_days=(.1, 100), hot_improvement=(5, 90))
     integers = {'min_deals_week', 'undercut', 'overview_limit', 'detail_limit', 'alert_limit', 'min_active_days'}
     for key, (lo, hi) in bounds.items():
         value = raw.get(key, result[key])

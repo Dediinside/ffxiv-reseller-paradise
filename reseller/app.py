@@ -4,6 +4,7 @@ import csv
 from pathlib import Path
 import queue
 import threading
+import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 import webbrowser
@@ -37,6 +38,9 @@ class Application:
         self.notifier = Notifier(self.folder / 'alerts.json')
         self.events, self.cancel = queue.Queue(), threading.Event()
         self.busy = self.monitoring = self.closed = False
+        self.hot_running = False
+        self.hot_rows = {}
+        self.hot_connection = ''
         self.monitor_timer = None
         self.deals, self.visible = [], []
         self.sort_key, self.reverse = 'profit_day', True
@@ -99,6 +103,8 @@ class Application:
         self.scan_button.pack(side='left')
         self.monitor_button = ttk.Button(buttons, text='Начать мониторинг', command=self.start_monitor)
         self.monitor_button.pack(side='left', padx=8)
+        self.hot_button = ttk.Button(buttons, text='Горячие предложения', command=self.start_hot)
+        self.hot_button.pack(side='left', padx=(0, 8))
         ttk.Button(buttons, text='Остановить', command=self.stop).pack(side='left')
         ttk.Button(buttons, text='Сохранить настройки', command=self.save).pack(side='left', padx=8)
         ttk.Button(buttons, text='Экспорт CSV', command=self.export).pack(side='left')
@@ -138,11 +144,12 @@ class Application:
                   ('Наша доля спроса, %', 'market_share'), ('Налог покупки, %', 'buy_tax'), ('Налог продажи, %', 'sell_tax'),
                   ('Дорога за покупку стака, gil', 'travel'), ('Снижение цены конкурента, gil', 'undercut'),
                   ('Пауза между циклами, минут', 'interval_minutes'), ('Товаров в предварительном отборе за цикл', 'overview_limit'),
-                  ('Товаров подробно за цикл', 'detail_limit'), ('Уведомлений максимум за цикл', 'alert_limit'),
+                  ('Товаров подробно за цикл', 'detail_limit'), ('Уведомлений за цикл / минуту потока', 'alert_limit'),
                   ('Пауза уведомлений об одном товаре/мире, мин.', 'cooldown_minutes'),
                   ('Проверить падение цены на, %', 'stress_drop'), ('Резерв бюджета корзины, %', 'reserve_percent'),
                   ('Минимум дней с продажами за неделю', 'min_active_days'), ('Близкие конкуренты: диапазон цены, %', 'nearby_percent'),
-                  ('Запас близких конкурентов ≤ дней спроса', 'max_supply_days')]
+                  ('Запас близких конкурентов ≤ дней спроса', 'max_supply_days'),
+                  ('Обойти паузу при снижении цены на, %', 'hot_improvement')]
         for index, (label, key) in enumerate(fields):
             row, col = divmod(index, 2)
             ttk.Label(settings, text=label).grid(row=row, column=col * 2, sticky='w', padx=8, pady=8)
@@ -151,6 +158,7 @@ class Application:
         ttk.Combobox(settings, textvariable=self.vars['priority'], values=['Оборот прибыли', 'Отдача капитала', 'Прибыль стака'], state='readonly', width=22).grid(row=12, column=1, sticky='w')
         ttk.Label(settings, text='Оборот прибыли: прибыль при падении цены / расчётные дни. Отдача капитала: этот показатель / затраты.\nСрок = близкий запас конкурентов / общий спрос + наш стак / (спрос × наша доля). Это модель, не обещание.\nКорзина выбирает по одному стаку товара/HQ в пределах общего бюджета с резервом. Покупки и личный инвентарь не отслеживаются.\nКаталог обходится частями с чередованием; средние цены нужны только для отбора. Старый кэш при ошибке сети не подставляется.', wraplength=1100).grid(row=13, column=0, columnspan=4, sticky='w', padx=8, pady=16)
         ttk.Button(settings, text='Сохранить настройки', command=self.save).grid(row=14, column=0, sticky='w', padx=8)
+        ttk.Button(settings, text='Сбросить лимит горячих рекомендаций', command=self.reset_hot_budget).grid(row=14, column=2, sticky='w', padx=8)
         ttk.Label(tg, text='Подключить уведомления', font=('Segoe UI', 16, 'bold')).pack(anchor='w')
         ttk.Label(tg, text='1. В Telegram откройте @BotFather → /newbot и создайте бота.\n2. Вставьте токен ниже, затем откройте своего бота и отправьте /start.\n3. Нажмите «Найти Chat ID», выберите свой чат и отправьте тест.\n4. Включите уведомления, сохраните настройки и начните мониторинг.\nПрограмма должна оставаться запущенной; при закрытии / сне компьютера мониторинг прекращается.', wraplength=1100).pack(anchor='w', pady=12)
         ttk.Label(tg, text='Токен бота (вводится только здесь)').pack(anchor='w')
@@ -223,7 +231,7 @@ class Application:
             elif not self.demo and not self.remember_token.get():
                 (self.folder / 'telegram-secret.json').unlink(missing_ok=True)
             if not quiet:
-                self.status.set('Настройки сохранены. ' + ('Токен защищён Windows.' if self.token.get() and not self.demo and self.remember_token.get() else ''))
+                self.status.set('Настройки сохранены. ' + ('Токен защищён Windows. ' if self.token.get() and not self.demo and self.remember_token.get() else '') + ('Для применения к потоку остановите и запустите его заново.' if self.hot_running else ''))
             return True
         except (ValueError, OSError) as exc:
             if not quiet:
@@ -237,6 +245,7 @@ class Application:
         self.cancel = threading.Event()
         self.scan_button.configure(state='disabled')
         self.monitor_button.configure(state='disabled')
+        self.hot_button.configure(state='disabled')
         cancel = self.cancel
         def run():
             try:
@@ -281,6 +290,37 @@ class Application:
         self.monitoring = True
         self.scan()
 
+    def start_hot(self):
+        if self.busy or not self.save():
+            return
+        self.stop()
+        self.hot_running = True
+        settings, token = copy.deepcopy(self.settings), self.token.get()
+        self.hot_rows = {}
+        self.deals, self.basket = [], []
+        self.render()
+        self.fill_detail('Горячий поток: только впервые замеченные или изменённые объявления.\nПервое наблюдение не доказывает, что товар только что выставили в игре.\nЛимит стоимости отправленных рекомендаций сохраняется до ручного сброса. Параметры применяются при запуске потока.')
+        from .hot import HotMonitor
+        def work(cancel):
+            value = HotMonitor(self.scanner, self.folder, self.notifier).run(settings, cancel,
+                         lambda kind, value: self.events.put((kind, value)),
+                         Telegram(token) if settings['notify'] and not self.demo else None)
+            return ('hot_done', value)
+        self.run_worker(work)
+
+    def reset_hot_budget(self):
+        if self.busy:
+            self.status.set('Сначала остановите мониторинг, чтобы сбросить лимит рекомендаций.')
+            return
+        try:
+            from .hot import Ledger
+            ledger = Ledger(self.folder / 'hot-advice.sqlite3')
+            ledger.reset(self.read())
+            ledger.close()
+            self.status.set('Лимит стоимости/объёма рекомендаций сброшен. Лимит сообщений за минуту сохранён.')
+        except (ValueError, OSError) as exc:
+            self.status.set(str(exc))
+
     def stop(self):
         self.monitoring = False
         self.cancel.set()
@@ -292,14 +332,37 @@ class Application:
     def poll(self):
         if self.closed:
             return
+        if self.hot_running and self.hot_rows:
+            now = time.time()
+            active = {k: row for k, row in self.hot_rows.items() if 0 <= now - row[1] < 90}
+            if len(active) != len(self.hot_rows):
+                self.hot_rows = active
+                self.deals = [row[0] for row in active.values()]
+                self.render()
         while not self.events.empty():
             kind, value = self.events.get_nowait()
             if kind == 'progress':
                 self.status.set(value)
                 continue
+            if kind == 'hot':
+                self.show_hot(value)
+                continue
+            if kind == 'hot_connection':
+                self.hot_connection = value
+                self.status.set(value)
+                continue
+            if kind == 'hot_remove':
+                self.hot_rows = {k: row for k, row in self.hot_rows.items() if row[0].offer_key not in value}
+                self.deals = [row[0] for row in self.hot_rows.values()]
+                self.render()
+                continue
             self.busy = False
             self.scan_button.configure(state='normal')
             self.monitor_button.configure(state='normal')
+            self.hot_button.configure(state='normal')
+            if self.hot_running:
+                self.hot_running = False
+                self.monitoring = False
             if kind == 'done':
                 self.handle(value)
             else:
@@ -317,7 +380,9 @@ class Application:
             self.scan()
 
     def handle(self, value):
-        if value[0] == 'scan':
+        if value[0] == 'hot_done':
+            self.status.set(value[1])
+        elif value[0] == 'scan':
             _, result, sent, errors = value
             self.deals = result.deals
             self.basket = result.basket
@@ -361,6 +426,21 @@ class Application:
             self.scanner.regions = self.regions
             self.set_dc()
             self.status.set('Миры и DC обновлены. Новый список выбора доступен после перезапуска.')
+
+    def show_hot(self, value):
+        deals, reasons, sent, events, dropped, expired, errors, spent = value
+        now = time.time()
+        self.hot_rows = {k: row for k, row in self.hot_rows.items() if 0 <= now - row[1] < 90}
+        for deal in deals:
+            self.hot_rows[deal.fingerprint] = (deal, deal.received or now)
+        while len(self.hot_rows) > 200:
+            self.hot_rows.pop(next(iter(self.hot_rows)))
+        self.deals = [row[0] for row in self.hot_rows.values()]
+        self.basket = []
+        self.basket_only.set(False)
+        self.render()
+        self.status.set(f'Горячий поток · событий {events} · находок в таблице {len(self.deals)} · Telegram {sent} · перегрузка {dropped} · просрочено {expired} · рекомендовано затрат {spent:,} gil' + (' · DEMO' if self.demo else ' · ' + self.hot_connection))
+        self.fill_detail('Проверены только объявления из событий, после свежего подтверждения Universalis.\nИстория других выгодных стаков не превращается в горячие находки.\n' + '\n'.join(f'{k}: {v}' for k, v in reasons.items()) + '\n' + '\n'.join(errors[:8]))
 
     def render(self):
         chosen = {d.fingerprint for d in self.basket}

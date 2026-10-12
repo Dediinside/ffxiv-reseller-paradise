@@ -86,18 +86,18 @@ class Notifier:
             output.append(deal)
         return output
 
-    def dispatch(self, deals, settings, bot, cancel=None):
+    def dispatch(self, deals, settings, bot, cancel=None, bypass_group=False, on_delivered=None):
         delivered, errors = 0, []
         now = self.now()
         self.state = {k: v for k, v in self.state.items() if 0 <= now - v < 30 * 86400}
-        for deal in self.eligible(deals, settings):
+        for deal in (deals if bypass_group else self.eligible(deals, settings)):
             check(cancel)
             now = self.now()
             # Chat-specific state, plus per-item/world/quality cooldown across new listings.
             prefix = settings['chat_id'] + ':'
             exact = prefix + 'listing:' + deal.fingerprint
             group = prefix + f'item:{deal.sale_world_id}:{deal.item}:{deal.buy_world_id}:{deal.hq}'
-            if exact in self.state or 0 <= now - self.state.get(group, -1e20) < settings['cooldown_minutes'] * 60:
+            if exact in self.state or not bypass_group and 0 <= now - self.state.get(group, -1e20) < settings['cooldown_minutes'] * 60:
                 continue
             try:
                 bot.send(settings['chat_id'], telegram_text(deal), cancel)
@@ -110,7 +110,11 @@ class Notifier:
             delivered += 1
             # Persist after each confirmed send; failures never count as delivered.
             try:
-                atomic_json(self.path, self.state)
+                try:
+                    if on_delivered is not None:
+                        on_delivered(deal)
+                finally:
+                    atomic_json(self.path, self.state)
             except OSError:
                 errors.append('Сообщение отправлено, но защита от повторов не сохранена. Остановите уведомления и проверьте доступ к папке настроек.')
                 break

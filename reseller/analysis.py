@@ -42,6 +42,9 @@ class Deal:
     near_supply: int = 0
     supply_days: float = 0
     active_days: int = 0
+    offer_key: str = ''
+    signal: str = ''
+    received: float = 0
 
     @property
     def buy_url(self):
@@ -53,7 +56,7 @@ class Deal:
 
     def detail(self):
         quality = 'HQ' if self.hq else 'NQ'
-        return (f'{self.name} #{self.item} · {quality}\n'
+        return ((self.signal + '\n' if self.signal else '') + f'{self.name} #{self.item} · {quality}\n'
                 f'Купить: {self.buy_world} · {self.quantity} шт. × {self.buy_price:,} gil\n'
                 f'Обычная цена по продажам: {self.usual_price:,} gil/шт.\n'
                 f'Предложенная продажа на {self.sale_world}: {self.sale_price:,} gil/шт.\n'
@@ -185,6 +188,9 @@ def analyze(items, snapshots, settings, worlds, dc_worlds, now=None):
                                        cost, revenue, profit, roi, discount, velocity, len(sales), days, ahead,
                                        max(age, (now - target_time) / 60), key, snap.truncated)
                     deal.stress_profit, deal.near_supply, deal.supply_days, deal.active_days = stress_profit, near, supply_days, active_days
+                    deal.offer_key = listing.offer_key
+                    if deal.offer_key:
+                        deal.fingerprint = hashlib.sha256(f'{deal.offer_key}:{target}'.encode()).hexdigest()
                     deal.profit_day = stress_profit / max(days, .25)
                     deal.capital_day = deal.profit_day / cost * 100
                     output.append(deal)
