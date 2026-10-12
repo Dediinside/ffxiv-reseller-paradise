@@ -45,6 +45,7 @@ class Deal:
     offer_key: str = ''
     signal: str = ''
     received: float = 0
+    availability: str = ''
 
     @property
     def buy_url(self):
@@ -56,7 +57,12 @@ class Deal:
 
     def detail(self):
         quality = 'HQ' if self.hq else 'NQ'
-        return ((self.signal + '\n' if self.signal else '') + f'{self.name} #{self.item} · {quality}\n'
+        reference = (f'Статус объявления: {self.availability}\n'
+                     f'Сохранённая цена продажи на {self.sale_world}: {self.sale_price:,} gil/шт.\n'
+                     f'На момент находки: {time.strftime("%d.%m.%Y %H:%M:%S", time.localtime(self.received))}\n'
+                     'Цена и прибыль относятся к сохранённому расчёту. Перед выставлением проверьте рынок продажи.\n'
+                     'Исчезновение объявления не подтверждает вашу покупку.\n\n') if self.availability else ''
+        return (reference + (self.signal + '\n' if self.signal else '') + f'{self.name} #{self.item} · {quality}\n'
                 f'Купить: {self.buy_world} · {self.quantity} шт. × {self.buy_price:,} gil\n'
                 f'Обычная цена по продажам: {self.usual_price:,} gil/шт.\n'
                 f'Предложенная продажа на {self.sale_world}: {self.sale_price:,} gil/шт.\n'

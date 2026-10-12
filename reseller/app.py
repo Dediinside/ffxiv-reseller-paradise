@@ -3,6 +3,7 @@ import copy
 import csv
 from pathlib import Path
 import queue
+import sqlite3
 import threading
 import time
 import tkinter as tk
@@ -17,10 +18,13 @@ from .storage import home, load_settings, load_token, normalize, atomic_json, sa
 from .telegram import Telegram, Notifier, credentials
 from .analysis import analyze, basket, rank
 from .market import Market
+from .history import History, FRESH, STALE, REMOVED
 
-COLS = [('name', 'Товар ↗', 220), ('buy_world', 'Купить на', 80), ('hq', 'HQ/NQ', 58),
+COLS = [('name', 'Товар ↗', 220), ('availability', 'Статус объявления', 160),
+        ('sale_price', 'Продажа/шт.', 100), ('sale_world', 'Продать на', 80),
+        ('buy_world', 'Купить на', 80), ('hq', 'HQ/NQ', 58),
         ('quantity', 'Шт.', 50), ('buy_price', 'Покупка/шт.', 90), ('usual_price', 'Обычно/шт.', 90),
-        ('sale_price', 'Продажа/шт.', 95), ('cost', 'Расход стака', 100), ('revenue', 'Выручка', 95),
+        ('cost', 'Расход стака', 100), ('revenue', 'Выручка', 95),
         ('profit', 'Прибыль', 100), ('stress_profit', 'При падении', 100), ('profit_day', 'gil/день*', 90),
         ('roi', 'ROI %', 65), ('units_day', 'Шт./день', 75), ('near_supply', 'Близких, шт.', 90),
         ('deals_week', 'Сделок/7д', 78), ('estimated_days', 'Дней', 60), ('upload_age', 'Данные, мин.', 90)]
@@ -40,6 +44,8 @@ class Application:
         self.busy = self.monitoring = self.closed = False
         self.hot_running = False
         self.hot_rows = {}
+        self.history = History(self.folder / ('demo-finds.sqlite3' if demo else 'hot-finds.sqlite3'))
+        self.history_error = ''
         self.hot_connection = ''
         self.monitor_timer = None
         self.deals, self.visible = [], []
@@ -136,6 +142,11 @@ class Application:
         table_frame.rowconfigure(0, weight=1)
         self.table.bind('<<TreeviewSelect>>', lambda e: self.describe())
         self.table.bind('<Double-1>', lambda e: self.open_buy())
+        actions = ttk.Frame(rec)
+        actions.pack(fill='x', pady=(6, 0))
+        ttk.Button(actions, text='История находок', command=self.open_history).pack(side='left')
+        ttk.Button(actions, text='Копировать цену продажи', command=lambda: self.copy_sale(self.selected())).pack(side='left', padx=8)
+        ttk.Label(actions, text='Статус относится к покупке; цена продажи сохранена на момент находки.').pack(side='left')
         self.detail = self.text(rec, 9)
         self.fill_detail('Каждая строка — отдельный целый стак. Спрос и обычная цена оцениваются на мире продажи.\nDEMO использует искусственные цены и никогда не отправляет Telegram.' if self.demo else 'Каждая строка — отдельный целый стак. Налоги и дорога включены. Суммарная закупка нескольких строк не оптимизируется.')
         fields = [('Мин. прибыль стака, gil', 'min_profit'), ('Мин. ROI, %', 'min_roi'), ('Мин. скидка к истории, %', 'min_discount'),
@@ -296,10 +307,13 @@ class Application:
         self.stop()
         self.hot_running = True
         settings, token = copy.deepcopy(self.settings), self.token.get()
-        self.hot_rows = {}
-        self.deals, self.basket = [], []
+        for deal, _ in self.hot_rows.values():
+            if deal.availability != REMOVED:
+                deal.availability = STALE
+        self.deals, self.basket = [row[0] for row in self.hot_rows.values()], []
+        self.basket_only.set(False)
         self.render()
-        self.fill_detail('Горячий поток: только впервые замеченные или изменённые объявления.\nПервое наблюдение не доказывает, что товар только что выставили в игре.\nЛимит стоимости отправленных рекомендаций сохраняется до ручного сброса. Параметры применяются при запуске потока.')
+        self.fill_detail('Горячий поток: только впервые замеченные или изменённые объявления.\nНаходки сохраняются: после 90 секунд статус меняется на «Нужно перепроверить», после удаления — «Снято или изменено».\nЦена продажи остаётся в таблице и истории после покупки и перезапуска.\nЛимит стоимости отправленных рекомендаций сохраняется до ручного сброса. Параметры применяются при запуске потока.')
         from .hot import HotMonitor
         def work(cancel):
             value = HotMonitor(self.scanner, self.folder, self.notifier).run(settings, cancel,
@@ -332,12 +346,14 @@ class Application:
     def poll(self):
         if self.closed:
             return
-        if self.hot_running and self.hot_rows:
+        if self.hot_rows:
             now = time.time()
-            active = {k: row for k, row in self.hot_rows.items() if 0 <= now - row[1] < 90}
-            if len(active) != len(self.hot_rows):
-                self.hot_rows = active
-                self.deals = [row[0] for row in active.values()]
+            changed = False
+            for deal, stamp in self.hot_rows.values():
+                if deal.availability == FRESH and not 0 <= now - stamp < 90:
+                    deal.availability = STALE
+                    changed = True
+            if changed:
                 self.render()
         while not self.events.empty():
             kind, value = self.events.get_nowait()
@@ -352,8 +368,11 @@ class Application:
                 self.status.set(value)
                 continue
             if kind == 'hot_remove':
-                self.hot_rows = {k: row for k, row in self.hot_rows.items() if row[0].offer_key not in value}
-                self.deals = [row[0] for row in self.hot_rows.values()]
+                keys = set(value)
+                for deal, _ in self.hot_rows.values():
+                    if deal.offer_key in keys:
+                        deal.availability = REMOVED
+                self.history_write(self.history.remove, value)
                 self.render()
                 continue
             self.busy = False
@@ -430,19 +449,25 @@ class Application:
     def show_hot(self, value):
         deals, reasons, sent, events, dropped, expired, errors, spent = value
         now = time.time()
-        self.hot_rows = {k: row for k, row in self.hot_rows.items() if 0 <= now - row[1] < 90}
         for deal in deals:
-            self.hot_rows[deal.fingerprint] = (deal, deal.received or now)
-        while len(self.hot_rows) > 200:
-            self.hot_rows.pop(next(iter(self.hot_rows)))
+            if deal.fingerprint not in self.hot_rows:
+                deal.received = deal.received or now
+                deal.availability = FRESH if 0 <= now - deal.received < 90 else STALE
+                self.hot_rows[deal.fingerprint] = (deal, deal.received)
+        if deals:
+            self.history_write(self.history.add, deals)
         self.deals = [row[0] for row in self.hot_rows.values()]
         self.basket = []
         self.basket_only.set(False)
         self.render()
-        self.status.set(f'Горячий поток · событий {events} · находок в таблице {len(self.deals)} · Telegram {sent} · перегрузка {dropped} · просрочено {expired} · рекомендовано затрат {spent:,} gil' + (' · DEMO' if self.demo else ' · ' + self.hot_connection))
-        self.fill_detail('Проверены только объявления из событий, после свежего подтверждения Universalis.\nИстория других выгодных стаков не превращается в горячие находки.\n' + '\n'.join(f'{k}: {v}' for k, v in reasons.items()) + '\n' + '\n'.join(errors[:8]))
+        self.status.set(f'Горячий поток · событий {events} · находок в таблице {len(self.deals)} · Telegram {sent} · перегрузка {dropped} · просрочено {expired} · рекомендовано затрат {spent:,} gil' + (' · DEMO' if self.demo else ' · ' + self.hot_connection) + self.history_error)
+        if not self.selected():
+            self.fill_detail('Находки и цены продажи сохраняются в «Истории находок». Устаревшие и снятые объявления остаются как справка.\n' + '\n'.join(f'{k}: {v}' for k, v in reasons.items()) + '\n' + '\n'.join(errors[:8]))
 
     def render(self):
+        selected = self.selected()
+        selected_id = selected.fingerprint if selected else None
+        scroll = self.table.yview()
         chosen = {d.fingerprint for d in self.basket}
         self.visible = [d for d in self.deals if self.search.get().casefold() in d.name.casefold() and (not self.basket_only.get() or d.fingerprint in chosen)]
         self.visible.sort(key=lambda d: getattr(d, self.sort_key), reverse=self.reverse)
@@ -463,6 +488,12 @@ class Application:
                     value = f'{value:,}'.replace(',', ' ')
                 values.append(value)
             self.table.insert('', 'end', iid=str(index), values=values, tags=('basket',) if deal.fingerprint in chosen else ())
+            if deal.fingerprint == selected_id:
+                self.table.selection_set(str(index))
+        if scroll:
+            self.table.yview_moveto(scroll[0])
+        if self.selected():
+            self.describe()
 
     def sort(self, key):
         self.reverse = not self.reverse if key == self.sort_key else key not in ('estimated_days', 'upload_age', 'cost', 'name', 'buy_world')
@@ -471,7 +502,83 @@ class Application:
 
     def selected(self):
         chosen = self.table.selection()
-        return self.visible[int(chosen[0])] if chosen else None
+        return self.visible[int(chosen[0])] if chosen and int(chosen[0]) < len(self.visible) else None
+
+    def history_write(self, operation, values):
+        try:
+            operation(values)
+            self.history_error = ''
+        except (sqlite3.Error, OSError):
+            self.history_error = ' · Не удалось сохранить историю на диск; строки доступны в текущем окне. Экспортируйте CSV.'
+            self.status.set(self.status.get() + self.history_error)
+
+    def copy_sale(self, deal):
+        if deal:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(str(deal.sale_price))
+            self.status.set(f'Скопирована сохранённая цена: {deal.sale_price:,} gil/шт. на {deal.sale_world}.')
+
+    def open_history(self):
+        dialog = tk.Toplevel(self.root)
+        dialog.title('История находок — сохранённые цены продажи')
+        dialog.geometry('1100x700')
+        query = tk.StringVar(dialog)
+        bar = ttk.Frame(dialog, padding=10)
+        bar.pack(fill='x')
+        ttk.Label(bar, text='Название товара').pack(side='left')
+        entry = ttk.Entry(bar, textvariable=query, width=35)
+        entry.pack(side='left', padx=8)
+        hint = ttk.Label(dialog, text='Последние 500 совпадений по всей истории. Цена относится к моменту находки; покупка не отслеживается.')
+        hint.pack(fill='x', padx=10)
+        frame = ttk.Frame(dialog, padding=10)
+        frame.pack(fill='both', expand=True)
+        columns = [('name', 'Товар', 240), ('availability', 'Статус', 155), ('sale_price', 'Продажа/шт.', 100),
+                   ('sale_world', 'Продать на', 85), ('buy_world', 'Купить на', 85), ('hq', 'HQ/NQ', 60),
+                   ('quantity', 'Шт.', 50), ('received', 'Найдено', 145)]
+        table = ttk.Treeview(frame, columns=[c[0] for c in columns], show='headings', height=10)
+        for key, label, width in columns:
+            table.heading(key, text=label)
+            table.column(key, width=width, stretch=key == 'name')
+        scrollbar = ttk.Scrollbar(frame, command=table.yview)
+        horizontal = ttk.Scrollbar(frame, orient='horizontal', command=table.xview)
+        table.configure(yscrollcommand=scrollbar.set, xscrollcommand=horizontal.set)
+        table.grid(row=0, column=0, sticky='nsew')
+        scrollbar.grid(row=0, column=1, sticky='ns')
+        horizontal.grid(row=1, column=0, sticky='ew')
+        frame.columnconfigure(0, weight=1)
+        frame.rowconfigure(0, weight=1)
+        detail = self.text(dialog, 9)
+        rows = []
+        def selected():
+            selection = table.selection()
+            return rows[int(selection[0])] if selection else None
+        def describe(event=None):
+            d = selected()
+            if d:
+                detail.configure(state='normal')
+                detail.delete('1.0', 'end')
+                detail.insert('1.0', d.detail())
+                detail.configure(state='disabled')
+        def refresh(event=None):
+            try:
+                found = self.history.recent(query.get())
+            except (sqlite3.Error, OSError):
+                hint.configure(text='Не удалось прочитать историю. Проверьте доступ к папке настроек.')
+                return
+            table.delete(*table.get_children())
+            rows[:] = found
+            detail.configure(state='normal')
+            detail.delete('1.0', 'end')
+            detail.configure(state='disabled')
+            for i, d in enumerate(rows):
+                table.insert('', 'end', iid=str(i), values=(d.name, d.availability, d.sale_price, d.sale_world, d.buy_world,
+                            'HQ' if d.hq else 'NQ', d.quantity, time.strftime('%d.%m.%y %H:%M:%S', time.localtime(d.received))))
+        ttk.Button(bar, text='Найти / обновить', command=refresh).pack(side='left')
+        ttk.Button(bar, text='Копировать цену', command=lambda: self.copy_sale(selected())).pack(side='left', padx=8)
+        ttk.Button(bar, text='Рынок продажи ↗', command=lambda: webbrowser.open(selected().sale_url) if selected() else None).pack(side='left')
+        entry.bind('<Return>', refresh)
+        table.bind('<<TreeviewSelect>>', describe)
+        refresh()
 
     def fill_detail(self, value):
         self.detail.configure(state='normal')
