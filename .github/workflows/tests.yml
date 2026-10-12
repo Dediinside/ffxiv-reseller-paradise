@@ -22,4 +22,6 @@ jobs:
       - name: Test market analysis, Telegram transport and GUI
         env:
           PYTHONIOENCODING: utf-8
-        run: python -m unittest discover -s tests -v
+        run: |
+          python -m pip install -r requirements.txt
+          python -m unittest discover -s tests -v
