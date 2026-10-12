@@ -20,6 +20,14 @@ from .analysis import analyze, basket, rank
 from .market import Market
 from .history import History, FRESH, STALE, REMOVED
 
+STATUS_COLORS = {FRESH: '#8fe2bd', STALE: '#f6d279', REMOVED: '#ffaaaa'}
+
+
+def status_colors(table):
+    for status, color in STATUS_COLORS.items():
+        table.tag_configure(status, foreground=color)
+
+
 COLS = [('name', 'Товар ↗', 220), ('availability', 'Статус объявления', 160),
         ('sale_price', 'Продажа/шт.', 100), ('sale_world', 'Продать на', 80),
         ('buy_world', 'Купить на', 80), ('hq', 'HQ/NQ', 58),
@@ -85,7 +93,8 @@ class Application:
         style.map('TButton', background=[('active', '#42628c')])
         style.configure('Treeview', background=field, fieldbackground=field, foreground=fg, rowheight=27)
         style.configure('Treeview.Heading', background='#303c4e', foreground=fg)
-        style.map('Treeview', background=[('selected', '#355e8d')])
+        # Keep status-tag text colors visible when a row is selected.
+        style.map('Treeview', background=[('selected', '#244268')], foreground=[('disabled', '#78818f')])
         self.root.option_add('*TCombobox*Listbox.background', field)
         self.root.option_add('*TCombobox*Listbox.foreground', fg)
         self.book = ttk.Notebook(self.root)
@@ -135,6 +144,7 @@ class Application:
         horizontal = ttk.Scrollbar(table_frame, orient='horizontal', command=self.table.xview)
         self.table.configure(yscrollcommand=scroll.set, xscrollcommand=horizontal.set)
         self.table.tag_configure('basket', foreground='#8fe2bd')
+        status_colors(self.table)
         self.table.grid(row=0, column=0, sticky='nsew')
         scroll.grid(row=0, column=1, sticky='ns')
         horizontal.grid(row=1, column=0, sticky='ew')
@@ -487,7 +497,8 @@ class Application:
                 elif isinstance(value, int):
                     value = f'{value:,}'.replace(',', ' ')
                 values.append(value)
-            self.table.insert('', 'end', iid=str(index), values=values, tags=('basket',) if deal.fingerprint in chosen else ())
+            tags = (deal.availability,) if deal.availability in STATUS_COLORS else ('basket',) if deal.fingerprint in chosen else ()
+            self.table.insert('', 'end', iid=str(index), values=values, tags=tags)
             if deal.fingerprint == selected_id:
                 self.table.selection_set(str(index))
         if scroll:
@@ -536,6 +547,7 @@ class Application:
                    ('sale_world', 'Продать на', 85), ('buy_world', 'Купить на', 85), ('hq', 'HQ/NQ', 60),
                    ('quantity', 'Шт.', 50), ('received', 'Найдено', 145)]
         table = ttk.Treeview(frame, columns=[c[0] for c in columns], show='headings', height=10)
+        status_colors(table)
         for key, label, width in columns:
             table.heading(key, text=label)
             table.column(key, width=width, stretch=key == 'name')
@@ -572,7 +584,8 @@ class Application:
             detail.configure(state='disabled')
             for i, d in enumerate(rows):
                 table.insert('', 'end', iid=str(i), values=(d.name, d.availability, d.sale_price, d.sale_world, d.buy_world,
-                            'HQ' if d.hq else 'NQ', d.quantity, time.strftime('%d.%m.%y %H:%M:%S', time.localtime(d.received))))
+                            'HQ' if d.hq else 'NQ', d.quantity, time.strftime('%d.%m.%y %H:%M:%S', time.localtime(d.received))),
+                            tags=(d.availability,) if d.availability in STATUS_COLORS else ())
         ttk.Button(bar, text='Найти / обновить', command=refresh).pack(side='left')
         ttk.Button(bar, text='Копировать цену', command=lambda: self.copy_sale(selected())).pack(side='left', padx=8)
         ttk.Button(bar, text='Рынок продажи ↗', command=lambda: webbrowser.open(selected().sale_url) if selected() else None).pack(side='left')
