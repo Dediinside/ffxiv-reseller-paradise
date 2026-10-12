@@ -7,3 +7,4 @@ settings.json
 telegram-secret.json
 alerts.json
 *.log
+*.sqlite3

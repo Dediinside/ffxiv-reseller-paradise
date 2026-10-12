@@ -1,1 +1,3 @@
-# Python 3.10+ with Tkinter. No third-party Python packages required.
+# Python 3.10+ with Tkinter; hot stream uses BSON and WebSocket.
+websocket-client==1.9.2
+pymongo==4.18.3

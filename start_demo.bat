@@ -2,8 +2,8 @@
 cd /d "%~dp0"
 where py >nul 2>nul
 if errorlevel 1 (
-    python run.py --demo
+    python bootstrap.py --demo
 ) else (
-    py -3 run.py --demo
+    py -3 bootstrap.py --demo
 )
 if errorlevel 1 pause
