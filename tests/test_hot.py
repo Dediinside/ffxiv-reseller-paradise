@@ -341,12 +341,83 @@ class HotGuiTests(unittest.TestCase):
                     socket.assert_not_called()
                 app.hot_running = True
                 d = deals()[0][0]
+                from reseller.history import FRESH, STALE
+                d.availability = FRESH
                 app.hot_rows = {d.fingerprint: (d, time.time() - 91)}
+                app.deals = [d]
+                app.render()
                 root.update()
                 root.after_cancel(app.poll_timer)
                 app.poll()
-                self.assertFalse(app.hot_rows)
-                self.assertFalse(app.table.get_children())
+                self.assertTrue(app.hot_rows)
+                self.assertTrue(app.table.get_children())
+                self.assertEqual(d.availability, STALE)
                 app.hot_running = False
             finally:
                 app.close()
+
+    def test_removed_find_keeps_price_selection_and_durable_history(self):
+        from reseller.app import Application
+        from reseller.history import REMOVED
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(str(exc))
+        root.withdraw()
+        with tempfile.TemporaryDirectory() as folder:
+            app = Application(root, demo=True, folder=Path(folder))
+            try:
+                d = replace(deals()[0][0], received=time.time(), offer_key='offer-one')
+                payload = lambda rows: (rows, {}, 0, 1, 0, 0, [], 0)
+                app.show_hot(payload([d]))
+                app.table.selection_set('0')
+                app.describe()
+                price = d.sale_price
+                other = replace(d, fingerprint='different', offer_key='offer-two', profit_day=d.profit_day + 100)
+                app.show_hot(payload([other]))
+                self.assertEqual(app.selected().fingerprint, d.fingerprint)
+                self.assertIn(f'{price:,} gil/шт.', app.detail.get('1.0', 'end'))
+                app.events.put(('hot_remove', ['offer-one']))
+                root.after_cancel(app.poll_timer)
+                app.poll()
+                self.assertEqual(len(app.table.get_children()), 2)
+                self.assertEqual(app.selected().availability, REMOVED)
+                self.assertEqual(app.selected().sale_price, price)
+                app.show_hot(payload([]))
+                self.assertIn(REMOVED, app.detail.get('1.0', 'end'))
+                app.copy_sale(app.selected())
+                self.assertEqual(root.clipboard_get(), str(price))
+                saved = {r.fingerprint: r for r in app.history.recent()}
+                self.assertEqual(saved[d.fingerprint].sale_price, price)
+                self.assertEqual(saved[d.fingerprint].availability, REMOVED)
+                app.open_history()
+                root.update()
+            finally:
+                app.close()
+
+
+class HistoryTests(unittest.TestCase):
+    def test_restart_preserves_original_quote_and_exact_removal(self):
+        from reseller.history import History, REMOVED, STALE
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'history.sqlite3'
+            history = History(path)
+            d = replace(deals()[0][0], received=NOW, offer_key='first')
+            changed = replace(d, fingerprint='second', offer_key='second', sale_price=d.sale_price + 300)
+            history.add([d, changed])
+            history.add([replace(d, sale_price=1)])
+            history.remove(['first'])
+            rows = {r.fingerprint: r for r in History(path).recent()}
+            self.assertEqual(rows[d.fingerprint].sale_price, d.sale_price)
+            self.assertEqual(rows[d.fingerprint].availability, REMOVED)
+            self.assertEqual(rows['second'].availability, STALE)
+            self.assertEqual(rows['second'].sale_price, changed.sale_price)
+
+    def test_search_finds_older_quotes_beyond_visible_limit(self):
+        from reseller.history import History
+        with tempfile.TemporaryDirectory() as folder:
+            history = History(Path(folder) / 'history.sqlite3')
+            d = replace(deals()[0][0], name='Old Useful Item', received=NOW)
+            history.add([d] + [replace(d, name='New Item', fingerprint=str(i), received=NOW + i + 1) for i in range(501)])
+            self.assertEqual(len(history.recent()), 500)
+            self.assertEqual(history.recent('old useful')[0].fingerprint, d.fingerprint)
